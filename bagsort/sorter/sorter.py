@@ -1,14 +1,20 @@
 """Dispatch: the step that turns a committed reading into a sort record.
 
-Dispatch refuses an uncommitted reading outright, and it refuses a bag that has
-already been sorted. Both refusals are the contracts other subsystems rely on:
-the desk must commit before routing, and a retried induction must not create a
-second sort record.
+Dispatch refuses an uncommitted reading outright, and it refuses a bag whose
+deduplication key has already been admitted. Both refusals are the contracts
+other subsystems rely on: the desk must commit before routing, and a retried
+induction must not create a second sort record.
+
+The dedup key is baggage number *plus* sequence generation (see
+:mod:`bagsort.dedup`), so after a sequence wrap a new bag that reuses a number
+is a different key and sorts normally, while a real re-induction of the same
+bag in the same generation collides and is refused exactly once.
 """
 
 from __future__ import annotations
 
 from bagsort.clock import Clock
+from bagsort.dedup.ledger import DedupLedger
 from bagsort.errors import ConflictError
 from bagsort.model.entities import Bag, Reading, SortRecord
 from bagsort.model.enums import BagState
@@ -30,17 +36,23 @@ class Sorter:
         chutes: ChuteAssigner,
         clock: Clock,
         verdict: VerdictTracker | None = None,
+        dedup: DedupLedger | None = None,
     ) -> None:
         self._store = store
         self._mapping = mapping
         self._chutes = chutes
         self._clock = clock
         self._verdict = verdict or VerdictTracker()
+        self._dedup = dedup or DedupLedger(store, clock)
         self._log = SortLog(store)
 
     @property
     def log(self) -> SortLog:
         return self._log
+
+    @property
+    def dedup(self) -> DedupLedger:
+        return self._dedup
 
     def route(self, bag_id: str) -> RouteDetail:
         flight_id = self._mapping.flight_of(bag_id)
@@ -55,8 +67,14 @@ class Sorter:
     def dispatch(self, bag: Bag, reading: Reading) -> SortRecord:
         if not reading.committed:
             raise ConflictError(f"barcode read for {bag.barcode!r} is not committed")
-        if self._log.was_executed(bag.id):
-            raise ConflictError(f"bag {bag.id!r} has already been sorted")
+        # Judge by number plus generation before opening the transaction, so a
+        # refused re-induction buffers no commands at all.
+        decision = self._dedup.decision_for(bag.id, bag.epoch)
+        if not decision.allowed:
+            raise ConflictError(
+                f"bag {bag.id!r} in epoch {bag.epoch} has already been sorted "
+                f"under dedup key {decision.key!r}"
+            )
         detail = self.route(bag.id)
         record = SortRecord(
             bag_id=bag.id,
@@ -69,10 +87,13 @@ class Sorter:
         updated = bag.evolved(chute_id=detail.chute_id, state=BagState.SORTED)
         with self._store.session() as session:
             session.state.sort_records.append(record)
-            session.state.bags[updated.id] = updated
             session.record(
                 "sort.record", {"record": record.as_dict()}, self._clock.now_iso()
             )
+            # Admit the key in the same transaction, immediately after the
+            # record it authorises, so the two journals line up for reconciliation.
+            self._dedup.record_admission(session, bag.id, bag.epoch, record.at)
+            session.state.bags[updated.id] = updated
             session.record("bag.put", {"bag": updated.as_dict()}, self._clock.now_iso())
             session.record(
                 "counter.add", {"name": "sorter.dispatched", "delta": 1}, self._clock.now_iso()
@@ -100,8 +121,17 @@ class Sorter:
     def high_water(self) -> tuple[int, int]:
         return self._verdict.high_water()
 
-    def was_executed(self, bag_id: str) -> bool:
-        return self._log.was_executed(bag_id)
+    def was_executed(self, bag_id: str, epoch: int | None = None) -> bool:
+        """Whether a bag was sorted.
+
+        With no generation given this answers across all generations (the
+        legacy question "have I ever seen this number?"); with an epoch it asks
+        the precise question the dedup gate answers.
+        """
+
+        if epoch is None:
+            return self._log.was_executed(bag_id)
+        return not self._dedup.is_allowed(bag_id, epoch)
 
     def records(self) -> list[SortRecord]:
         return self._log.records()

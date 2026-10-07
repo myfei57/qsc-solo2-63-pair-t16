@@ -36,6 +36,7 @@ from bagsort.tag.history import ReadHistory
 from bagsort.tag.reader import TagReader
 from bagsort.chute.assigner import ChuteAssigner
 from bagsort.chute.history import AssignmentHistory
+from bagsort.dedup.ledger import DedupLedger
 from bagsort.console.metrics import Metrics
 from bagsort.console.telemetry import Telemetry
 
@@ -61,6 +62,7 @@ class Plant:
     closer: FlightCloser
     chutes: ChuteAssigner
     chute_history: AssignmentHistory
+    dedup: DedupLedger
     sorter: Sorter
     injector: Injector
     desk: Desk
@@ -91,14 +93,15 @@ class Plant:
         metrics = Metrics()
         bus.subscribe("*", lambda event: telemetry.observe(event.topic))
 
-        reader = TagReader(store, namespace, clock)
+        dedup = DedupLedger(store, clock)
+        reader = TagReader(store, namespace, clock, dedup)
         reads = ReadHistory(store)
         book = FlightBook(store, clock)
         mapping = BagMapping(store, clock)
         schedule = ScheduleBoard(store, clock)
         chutes = ChuteAssigner(store, clock)
         chute_history = AssignmentHistory(store)
-        sorter = Sorter(store, mapping, chutes, clock, VerdictTracker())
+        sorter = Sorter(store, mapping, chutes, clock, VerdictTracker(), dedup)
         injector = Injector(store, book, sorter, clock)
         quota = QuotaBook(store, clock)
         desk = Desk(store, reader, book, mapping, injector, quota, clock, handling_line())
@@ -107,6 +110,7 @@ class Plant:
         belt = Belt(store, clock, IdFactory("cmd"))
 
         audit = AuditChain(store, clock, handling_line())
+        dedup.attach_recorder(audit)
         audit_subscriber = _AuditSubscriber(audit)
         for topic in (
             "bag.checked_in",
@@ -139,6 +143,7 @@ class Plant:
             closer=closer,
             chutes=chutes,
             chute_history=chute_history,
+            dedup=dedup,
             sorter=sorter,
             injector=injector,
             desk=desk,
@@ -181,23 +186,28 @@ class Plant:
         self.bus.publish("bag.diverted", bag_id=bag.id, reason="checkin_cancelled")
         return bag
 
-    def bag(self, bag_id: str) -> Bag:
+    def bag(self, bag_id: str, epoch: int | None = None) -> Bag:
+        if epoch is not None:
+            bag = self.reads.generation(bag_id, epoch)
+            if bag is None:
+                raise unknown_bag(f"{bag_id}@epoch{epoch}")
+            return bag
         bag = self.store.state().bags.get(bag_id)
         if bag is None:
             raise unknown_bag(bag_id)
         return bag
 
-    def push_bag(self, bag_id: str, chute_id: str) -> SortRecord:
-        bag = self.bag(bag_id)
+    def push_bag(self, bag_id: str, chute_id: str, epoch: int | None = None) -> SortRecord:
+        bag = self.bag(bag_id, epoch)
         record = self.injector.push(bag, chute_id)
-        self.bus.publish("bag.sorted", bag_id=bag.id, chute_id=record.chute_id)
+        self.bus.publish("bag.sorted", bag_id=bag.id, chute_id=record.chute_id, epoch=bag.epoch)
         return record
 
-    def retry_bag(self, bag_id: str) -> bool:
-        bag = self.bag(bag_id)
+    def retry_bag(self, bag_id: str, epoch: int | None = None) -> bool:
+        bag = self.bag(bag_id, epoch)
         sorted_now = self.injector.retry(bag)
         if sorted_now:
-            self.bus.publish("bag.sorted", bag_id=bag.id, retry=True)
+            self.bus.publish("bag.sorted", bag_id=bag.id, retry=True, epoch=bag.epoch)
         return sorted_now
 
     def divert_bag(self, bag_id: str) -> Bag:
@@ -245,6 +255,34 @@ class Plant:
 
     def verify(self) -> bool:
         return self.audit.verify()
+
+    def dedup_status(self) -> dict:
+        """The active key grammar, its declarations and the current cross check."""
+
+        return {
+            "scheme": self.dedup.current().scheme,
+            "cutoff_epoch": self.dedup.current().cutoff_epoch,
+            "declared": self.dedup.is_declared(),
+            "history": [scheme.as_dict() for scheme in self.dedup.history()],
+            "reconciliation": self.dedup.reconcile_report(),
+        }
+
+    def dedup_reconcile(self) -> dict:
+        return self.dedup.reconcile_report()
+
+    def wrap_review(self, previous_epoch: int, limit: int = 10) -> dict:
+        """Bag-by-bag rows around one wrap, plus numbers reused across it."""
+
+        return {
+            "previous_epoch": previous_epoch,
+            "window": self.dedup.wrap_window(previous_epoch, limit=limit),
+            "reused_numbers": self.dedup.wrap_pairs(previous_epoch),
+        }
+
+    def declare_dedup_scheme(self, scheme: str, cutoff_epoch: int, reason: str = ""):
+        """Force a grammar change; audited so the key change is traceable."""
+
+        return self.dedup.declare_scheme(scheme, cutoff_epoch, reason)
 
 
 class _AuditSubscriber:

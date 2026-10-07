@@ -14,6 +14,8 @@ from .entities import (
     AuditEntry,
     Bag,
     ChuteAssignment,
+    DedupAdmission,
+    DedupScheme,
     Flight,
     LoadRecord,
     Sequence,
@@ -29,9 +31,12 @@ class State:
 
     flights: dict[str, Flight] = field(default_factory=dict)
     bags: dict[str, Bag] = field(default_factory=dict)
+    bag_generations: list[Bag] = field(default_factory=list)
     mappings: dict[str, str] = field(default_factory=dict)
     assignments: dict[str, ChuteAssignment] = field(default_factory=dict)
     sort_records: list[SortRecord] = field(default_factory=list)
+    dedup_admissions: list[DedupAdmission] = field(default_factory=list)
+    dedup_schemes: list[DedupScheme] = field(default_factory=list)
     transfer_commands: list[TransferCommand] = field(default_factory=list)
     load_records: list[LoadRecord] = field(default_factory=list)
     audit: list[AuditEntry] = field(default_factory=list)
@@ -47,9 +52,12 @@ class State:
         return State(
             flights=dict(self.flights),
             bags=dict(self.bags),
+            bag_generations=list(self.bag_generations),
             mappings=dict(self.mappings),
             assignments=dict(self.assignments),
             sort_records=list(self.sort_records),
+            dedup_admissions=list(self.dedup_admissions),
+            dedup_schemes=list(self.dedup_schemes),
             transfer_commands=list(self.transfer_commands),
             load_records=list(self.load_records),
             audit=list(self.audit),
@@ -66,11 +74,14 @@ class State:
         return {
             "flights": {key: value.as_dict() for key, value in sorted(self.flights.items())},
             "bags": {key: value.as_dict() for key, value in sorted(self.bags.items())},
+            "bag_generations": [bag.as_dict() for bag in self.bag_generations],
             "mappings": dict(sorted(self.mappings.items())),
             "assignments": {
                 key: value.as_dict() for key, value in sorted(self.assignments.items())
             },
             "sort_records": [record.as_dict() for record in self.sort_records],
+            "dedup_admissions": [entry.as_dict() for entry in self.dedup_admissions],
+            "dedup_schemes": [scheme.as_dict() for scheme in self.dedup_schemes],
             "transfer_commands": [command.as_dict() for command in self.transfer_commands],
             "load_records": [record.as_dict() for record in self.load_records],
             "audit": [entry.as_dict() for entry in self.audit],
@@ -104,8 +115,26 @@ def apply_entry(state: State, kind: str, payload: dict[str, Any]) -> None:
     elif kind == "bag.put":
         bag = Bag.from_dict(payload["bag"])
         state.bags[bag.id] = bag
+        # Keep one current record per (number, generation). A commit with the
+        # same number in a wrapped epoch appends a new piece; a state evolution
+        # of an existing piece (injected/sorted/...) updates it in place.
+        generation_index = next(
+            (
+                index
+                for index, item in enumerate(state.bag_generations)
+                if item.id == bag.id and item.epoch == bag.epoch
+            ),
+            None,
+        )
+        if generation_index is None:
+            state.bag_generations.append(bag)
+        else:
+            state.bag_generations[generation_index] = bag
     elif kind == "bag.remove":
         state.bags.pop(str(payload["bag_id"]), None)
+        state.bag_generations = [
+            bag for bag in state.bag_generations if bag.id != str(payload["bag_id"])
+        ]
         state.mappings.pop(str(payload["bag_id"]), None)
     elif kind == "mapping.put":
         state.mappings[str(payload["bag_id"])] = str(payload["flight_id"])
@@ -113,6 +142,10 @@ def apply_entry(state: State, kind: str, payload: dict[str, Any]) -> None:
         state.sequence = Sequence.from_dict(payload)
     elif kind == "sort.record":
         state.sort_records.append(SortRecord.from_dict(payload["record"]))
+    elif kind == "dedup.admit":
+        state.dedup_admissions.append(DedupAdmission.from_dict(payload["admission"]))
+    elif kind == "dedup.scheme":
+        state.dedup_schemes.append(DedupScheme.from_dict(payload["scheme"]))
     elif kind == "transfer.append":
         state.transfer_commands.append(TransferCommand.from_dict(payload["command"]))
     elif kind == "transfer.clear_before":

@@ -303,8 +303,26 @@ def handle_route_detail(server, request: Request) -> Response:
 
 
 def handle_sort_count(server, request: Request) -> Response:
-    count = _plant(server).sorter.log.count_for(request.param("id"))
-    return json_response({"bag_id": request.param("id"), "count": count})
+    plant = _plant(server)
+    bag_id = request.param("id")
+    epoch_text = request.query_str("epoch")
+    if epoch_text:
+        epoch = int(epoch_text)
+        count = plant.sorter.log.count_for_epoch(bag_id, epoch)
+        records = [
+            record.as_dict()
+            for record in plant.sorter.log.records_for(bag_id)
+            if record.epoch == epoch
+        ]
+        return json_response({"bag_id": bag_id, "epoch": epoch, "count": count, "records": records})
+    count = plant.sorter.log.count_for(bag_id)
+    return json_response(
+        {
+            "bag_id": bag_id,
+            "count": count,
+            "records": [record.as_dict() for record in plant.sorter.log.records_for(bag_id)],
+        }
+    )
 
 
 def handle_last_chute(server, request: Request) -> Response:
@@ -442,13 +460,17 @@ def handle_read_history(server, request: Request) -> Response:
 
 
 def handle_sort_push(server, request: Request) -> Response:
-    record = _plant(server).push_bag(request.required("bag_id"), request.required("chute_id"))
+    epoch = request.int_field("epoch") if "epoch" in request.payload else None
+    record = _plant(server).push_bag(
+        request.required("bag_id"), request.required("chute_id"), epoch
+    )
     return json_response(record.as_dict(), status=201)
 
 
 def handle_sort_dispatch(server, request: Request) -> Response:
     plant = _plant(server)
-    bag = plant.bag(request.required("bag_id"))
+    epoch = request.int_field("epoch") if "epoch" in request.payload else None
+    bag = plant.bag(request.required("bag_id"), epoch)
     reading = Reading(
         barcode=bag.barcode,
         bag_id=bag.id,
@@ -461,7 +483,8 @@ def handle_sort_dispatch(server, request: Request) -> Response:
 
 
 def handle_retry(server, request: Request) -> Response:
-    sorted_now = _plant(server).retry_bag(request.required("bag_id"))
+    epoch = request.int_field("epoch") if "epoch" in request.payload else None
+    sorted_now = _plant(server).retry_bag(request.required("bag_id"), epoch)
     return json_response({"sorted": sorted_now})
 
 
@@ -491,6 +514,51 @@ def handle_verdict(server, request: Request) -> Response:
 def handle_high_water(server, request: Request) -> Response:
     epoch, sequence = _plant(server).sorter.high_water()
     return json_response({"epoch": epoch, "sequence": sequence})
+
+
+# ---------------------------------------------------------------------------
+# dedup gate, key scheme and rollover review
+# ---------------------------------------------------------------------------
+
+
+def handle_dedup_status(server, request: Request) -> Response:
+    return json_response(_plant(server).dedup_status())
+
+
+def handle_dedup_reconcile(server, request: Request) -> Response:
+    return json_response(_plant(server).dedup_reconcile())
+
+
+def handle_wrap_review(server, request: Request) -> Response:
+    plant = _plant(server)
+    previous_epoch = request.query_int("epoch")
+    limit = request.query_int("limit", 10) or 10
+    return json_response(plant.wrap_review(previous_epoch, limit=limit))
+
+
+def handle_dedup_scheme(server, request: Request) -> Response:
+    plant = _plant(server)
+    scheme = plant.declare_dedup_scheme(
+        request.required("scheme"),
+        request.int_field("cutoff_epoch"),
+        request.str_field("reason"),
+    )
+    return json_response(scheme.as_dict(), status=201)
+
+
+def handle_dedup_keys(server, request: Request) -> Response:
+    return json_response({"keys": _plant(server).dedup.admitted_keys()})
+
+
+def handle_bag_generations(server, request: Request) -> Response:
+    bag_id = request.param("id")
+    plant = _plant(server)
+    generations = [
+        bag.as_dict()
+        for bag in plant.reads.generations()
+        if bag.id == bag_id
+    ]
+    return json_response({"bag_id": bag_id, "generations": generations})
 
 
 # ---------------------------------------------------------------------------

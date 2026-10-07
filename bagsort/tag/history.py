@@ -16,6 +16,21 @@ class ReadHistory:
         state = self._store.state()
         return [state.bags[key] for key in sorted(state.bags)]
 
+    def generations(self) -> list[Bag]:
+        """One record per committed (baggage number, sequence generation)."""
+
+        return list(self._store.state().bag_generations)
+
+    def generation(self, bag_id: str, epoch: int) -> Bag | None:
+        return next(
+            (
+                bag
+                for bag in self._store.state().bag_generations
+                if bag.id == bag_id and bag.epoch == epoch
+            ),
+            None,
+        )
+
     def count(self) -> int:
         return len(self._store.state().bags)
 

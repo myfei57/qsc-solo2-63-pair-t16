@@ -65,7 +65,7 @@ class Injector:
     def retry(self, bag: Bag) -> bool:
         """Re-drive a bag that may already have been sorted; returns True if it sorted."""
 
-        if self._sorter.was_executed(bag.id):
+        if self._sorter.was_executed(bag.id, bag.epoch):
             return False
         reading = Reading(
             barcode=bag.barcode,

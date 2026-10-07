@@ -239,6 +239,75 @@ class LoadRecord:
 
 
 @dataclass(frozen=True)
+class DedupAdmission:
+    """One key the dedup gate has already accepted, recorded for cross checking.
+
+    ``scheme`` is the version of the key grammar; ``bag_id`` is the baggage
+    number as namespaced at check-in and ``epoch`` is the sequence generation it
+    was admitted in. Under scheme ``v2`` a wrapped bag reuses a baggage number in
+    a new epoch and therefore produces a distinct admission.
+    """
+
+    scheme: str
+    key: str
+    bag_id: str
+    epoch: int
+    at: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "scheme": self.scheme,
+            "key": self.key,
+            "bag_id": self.bag_id,
+            "epoch": self.epoch,
+            "at": self.at,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "DedupAdmission":
+        return cls(
+            scheme=str(raw.get("scheme", "")),
+            key=str(raw.get("key", "")),
+            bag_id=str(raw.get("bag_id", "")),
+            epoch=int(raw.get("epoch", 0)),
+            at=str(raw.get("at", "")),
+        )
+
+
+@dataclass(frozen=True)
+class DedupScheme:
+    """A declared version of the dedup key grammar and the boundary it created.
+
+    ``cutoff_epoch`` records the boundary for legacy compatibility: every sort
+    record whose epoch is below it was judged under older grammars and stays
+    queryable under them, while new judgments use this scheme's grammar. The
+    declaration is journaled and audit linked, so a key change is traceable.
+    """
+
+    scheme: str
+    cutoff_epoch: int
+    at: str
+    reason: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "scheme": self.scheme,
+            "cutoff_epoch": self.cutoff_epoch,
+            "at": self.at,
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "DedupScheme":
+        return cls(
+            scheme=str(raw.get("scheme", "")),
+            cutoff_epoch=int(raw.get("cutoff_epoch", 0)),
+            at=str(raw.get("at", "")),
+            reason=str(raw.get("reason", "")),
+        )
+
+
+@dataclass(frozen=True)
 class Sequence:
     epoch: int = 0
     next_value: int = 0

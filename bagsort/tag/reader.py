@@ -8,6 +8,7 @@ stores the bag and makes the reading visible to dispatch.
 from __future__ import annotations
 
 from bagsort.clock import Clock
+from bagsort.dedup.ledger import DedupLedger
 from bagsort.model.entities import Bag, Reading, Sequence
 from bagsort.model.enums import BagState
 from bagsort.model.validate import validate_reading
@@ -19,10 +20,17 @@ from bagsort.store.store import Store
 class TagReader:
     """Reads barcodes from the induction belt and commits them to the log."""
 
-    def __init__(self, store: Store, namespace: Namespace, clock: Clock) -> None:
+    def __init__(
+        self,
+        store: Store,
+        namespace: Namespace,
+        clock: Clock,
+        dedup: DedupLedger | None = None,
+    ) -> None:
         self._store = store
         self._ns = namespace
         self._clock = clock
+        self._dedup = dedup
 
     @property
     def namespace(self) -> Namespace:
@@ -54,6 +62,14 @@ class TagReader:
         validate_reading(reading)
         state = self._store.state()
         allocation = allocate(state.sequence)
+        if self._dedup is not None:
+            # Establish the key grammar before the bag is stored; a wrap opens
+            # the boundary at which the grammar widens from number to
+            # number-plus-generation.
+            if allocation.rolled_over:
+                self._dedup.declare_on_wrap(allocation.sequence.epoch)
+            else:
+                self._dedup.note_commit(allocation.sequence.epoch)
         bag = Bag(
             id=reading.bag_id,
             barcode=reading.barcode,

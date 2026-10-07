@@ -85,6 +85,8 @@ class Store:
             "bags": len(state.bags),
             "assignments": len(state.assignments),
             "sort_records": len(state.sort_records),
+            "dedup_admissions": len(state.dedup_admissions),
+            "dedup_schemes": len(state.dedup_schemes),
             "transfer_commands": len(state.transfer_commands),
             "load_records": len(state.load_records),
             "audit": len(state.audit),

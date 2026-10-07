@@ -21,6 +21,16 @@ class SortLog:
     def count_for(self, bag_id: str) -> int:
         return sum(1 for record in self._store.state().sort_records if record.bag_id == bag_id)
 
+    def count_for_epoch(self, bag_id: str, epoch: int) -> int:
+        return sum(
+            1
+            for record in self._store.state().sort_records
+            if record.bag_id == bag_id and record.epoch == epoch
+        )
+
+    def records_for(self, bag_id: str) -> list[SortRecord]:
+        return [record for record in self._store.state().sort_records if record.bag_id == bag_id]
+
     def last_chute(self, bag_id: str) -> str:
         last = ""
         for record in self._store.state().sort_records:

@@ -77,6 +77,7 @@ def route_table() -> list[Route]:
         Route("POST", "/api/bags/{id}/remap", "move a bag to another flight", "handle_remap_bag"),
         Route("GET", "/api/bags/{id}/route", "resolved route of a bag", "handle_route_detail"),
         Route("GET", "/api/bags/{id}/sort-count", "how often a bag was sorted", "handle_sort_count"),
+        Route("GET", "/api/bags/{id}/generations", "one record per wrapped generation", "handle_bag_generations"),
         Route("GET", "/api/bags/{id}/last-chute", "the chute a bag last used", "handle_last_chute"),
         # -- chutes -------------------------------------------------------
         Route("GET", "/api/chutes", "list registered lanes", "handle_list_chutes"),
@@ -107,6 +108,12 @@ def route_table() -> list[Route]:
         Route("GET", "/api/sort/by-chute", "sort totals per chute", "handle_sort_by_chute"),
         Route("POST", "/api/sort/verdict", "classify a sequence pair", "handle_verdict"),
         Route("GET", "/api/sort/high-water", "freshness high water mark", "handle_high_water"),
+        # -- dedup --------------------------------------------------------
+        Route("GET", "/api/dedup", "dedup key scheme and cross check", "handle_dedup_status"),
+        Route("GET", "/api/dedup/reconcile", "cross check admissions against sort records", "handle_dedup_reconcile"),
+        Route("GET", "/api/dedup/wrap-review", "bag-by-bag rows around a wrap", "handle_wrap_review"),
+        Route("POST", "/api/dedup/scheme", "declare a dedup key grammar change", "handle_dedup_scheme"),
+        Route("GET", "/api/dedup/keys", "admitted dedup keys", "handle_dedup_keys"),
         # -- inject -------------------------------------------------------
         Route("GET", "/api/inject/{flight}/queue", "in-transit queue", "handle_inject_queue"),
         Route("GET", "/api/inject/{flight}/in-transit", "in-transit count", "handle_in_transit"),
