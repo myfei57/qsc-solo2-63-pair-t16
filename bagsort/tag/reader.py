@@ -7,6 +7,8 @@ stores the bag and makes the reading visible to dispatch.
 
 from __future__ import annotations
 
+from typing import Callable
+
 from bagsort.clock import Clock
 from bagsort.model.entities import Bag, Reading, Sequence
 from bagsort.model.enums import BagState
@@ -15,14 +17,23 @@ from bagsort.ns.namespace import Namespace
 from bagsort.sequence.allocator import allocate
 from bagsort.store.store import Store
 
+RolloverHook = Callable[[], None]
+
 
 class TagReader:
     """Reads barcodes from the induction belt and commits them to the log."""
 
-    def __init__(self, store: Store, namespace: Namespace, clock: Clock) -> None:
+    def __init__(
+        self,
+        store: Store,
+        namespace: Namespace,
+        clock: Clock,
+        on_rollover: RolloverHook | None = None,
+    ) -> None:
         self._store = store
         self._ns = namespace
         self._clock = clock
+        self._on_rollover = on_rollover
 
     @property
     def namespace(self) -> Namespace:
@@ -54,6 +65,11 @@ class TagReader:
         validate_reading(reading)
         state = self._store.state()
         allocation = allocate(state.sequence)
+        # The first wrap is the moment the dedup key must gain a generation:
+        # the marker lands before the first new-generation bag so the v2
+        # boundary cannot be crossed silently.
+        if allocation.rolled_over and self._on_rollover is not None:
+            self._on_rollover()
         bag = Bag(
             id=reading.bag_id,
             barcode=reading.barcode,

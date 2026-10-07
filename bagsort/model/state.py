@@ -21,6 +21,7 @@ from .entities import (
     TransferCommand,
 )
 from bagsort.errors import ValidationError
+from bagsort.model.dedup import KEY_SCHEMA_V1, MARKER_KIND, encode_key
 
 
 @dataclass
@@ -32,12 +33,23 @@ class State:
     mappings: dict[str, str] = field(default_factory=dict)
     assignments: dict[str, ChuteAssignment] = field(default_factory=dict)
     sort_records: list[SortRecord] = field(default_factory=list)
+    # Materialised dedup set, one encoded (bag id, generation) key per sort
+    # record, in commit order. Rebuilt by replay, so it never drifts from the
+    # sort records it deduplicates.
+    dedup_keys: list[str] = field(default_factory=list)
     transfer_commands: list[TransferCommand] = field(default_factory=list)
     load_records: list[LoadRecord] = field(default_factory=list)
     audit: list[AuditEntry] = field(default_factory=list)
     quota_limits: dict[str, int] = field(default_factory=dict)
     counters: dict[str, int] = field(default_factory=dict)
     sequence: Sequence = field(default_factory=Sequence)
+    # Append-only ledger of every bag generation ever committed, as encoded
+    # (bag id, generation) keys in commit order. Unlike ``bags`` it is not
+    # keyed by bag id, so a post-wrap reuse of an id never hides the old one.
+    bag_instances: list[str] = field(default_factory=list)
+    # Ordered dedup key schema markers; the last entry fixes the current
+    # schema. Empty means only the v1 (bag id) historical schema ever applied.
+    dedup_schemas: list[dict[str, Any]] = field(default_factory=list)
     recheck_queue: list[str] = field(default_factory=list)
     belt_carousel: str = ""
     belt_batch: int = 0
@@ -50,12 +62,15 @@ class State:
             mappings=dict(self.mappings),
             assignments=dict(self.assignments),
             sort_records=list(self.sort_records),
+            dedup_keys=list(self.dedup_keys),
             transfer_commands=list(self.transfer_commands),
             load_records=list(self.load_records),
             audit=list(self.audit),
             quota_limits=dict(self.quota_limits),
             counters=dict(self.counters),
             sequence=self.sequence,
+            bag_instances=list(self.bag_instances),
+            dedup_schemas=list(self.dedup_schemas),
             recheck_queue=list(self.recheck_queue),
             belt_carousel=self.belt_carousel,
             belt_batch=self.belt_batch,
@@ -71,12 +86,15 @@ class State:
                 key: value.as_dict() for key, value in sorted(self.assignments.items())
             },
             "sort_records": [record.as_dict() for record in self.sort_records],
+            "dedup_keys": list(self.dedup_keys),
             "transfer_commands": [command.as_dict() for command in self.transfer_commands],
             "load_records": [record.as_dict() for record in self.load_records],
             "audit": [entry.as_dict() for entry in self.audit],
             "quota_limits": dict(sorted(self.quota_limits.items())),
             "counters": dict(sorted(self.counters.items())),
             "sequence": self.sequence.as_dict(),
+            "bag_instances": list(self.bag_instances),
+            "dedup_schema": dedup_schema_of(self),
             "recheck_queue": list(self.recheck_queue),
             "belt": {
                 "carousel": self.belt_carousel,
@@ -84,6 +102,14 @@ class State:
                 "on_carousel": list(self.belt_on_carousel),
             },
         }
+
+def dedup_schema_of(state: "State") -> int:
+    """The dedup key schema currently in force for ``state``."""
+
+    if not state.dedup_schemas:
+        return KEY_SCHEMA_V1
+    return int(state.dedup_schemas[-1]["to"])
+
 
 def apply_entry(state: State, kind: str, payload: dict[str, Any]) -> None:
     """Apply one journal command to ``state`` in place."""
@@ -104,6 +130,9 @@ def apply_entry(state: State, kind: str, payload: dict[str, Any]) -> None:
     elif kind == "bag.put":
         bag = Bag.from_dict(payload["bag"])
         state.bags[bag.id] = bag
+        instance = encode_key(bag.id, bag.epoch)
+        if instance not in state.bag_instances:
+            state.bag_instances.append(instance)
     elif kind == "bag.remove":
         state.bags.pop(str(payload["bag_id"]), None)
         state.mappings.pop(str(payload["bag_id"]), None)
@@ -111,8 +140,17 @@ def apply_entry(state: State, kind: str, payload: dict[str, Any]) -> None:
         state.mappings[str(payload["bag_id"])] = str(payload["flight_id"])
     elif kind == "sequence.put":
         state.sequence = Sequence.from_dict(payload)
+    elif kind == MARKER_KIND:
+        marker = {
+            "from": int(payload.get("from", KEY_SCHEMA_V1)),
+            "to": int(payload["to"]),
+            "at": str(payload.get("at", "")),
+        }
+        state.dedup_schemas.append(marker)
     elif kind == "sort.record":
-        state.sort_records.append(SortRecord.from_dict(payload["record"]))
+        record = SortRecord.from_dict(payload["record"])
+        state.sort_records.append(record)
+        state.dedup_keys.append(encode_key(record.bag_id, record.epoch))
     elif kind == "transfer.append":
         state.transfer_commands.append(TransferCommand.from_dict(payload["command"]))
     elif kind == "transfer.clear_before":
@@ -134,12 +172,12 @@ def apply_entry(state: State, kind: str, payload: dict[str, Any]) -> None:
         name = str(payload["name"])
         state.counters[name] = state.counters.get(name, 0) + int(payload["delta"])
     elif kind == "recheck.enqueue":
-        bag_id = str(payload["bag_id"])
-        if bag_id not in state.recheck_queue:
-            state.recheck_queue.append(bag_id)
+        token = str(payload["bag_id"])
+        if token not in state.recheck_queue:
+            state.recheck_queue.append(token)
     elif kind == "recheck.dequeue":
-        bag_id = str(payload["bag_id"])
-        state.recheck_queue = [item for item in state.recheck_queue if item != bag_id]
+        token = str(payload["bag_id"])
+        state.recheck_queue = [item for item in state.recheck_queue if item != token]
     elif kind == "recheck.clear":
         state.recheck_queue = []
     elif kind == "belt.set":

@@ -52,6 +52,16 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("status", help="print the store status")
     commands.add_parser("export", help="print audit and sort records as CSV")
 
+    dedup = commands.add_parser("dedup", help="inspect or change the sort dedup key schema")
+    dedup_sub = dedup.add_subparsers(dest="dedup_command")
+    dedup_sub.add_parser("status", help="current schema and cross check")
+    dedup_sub.add_parser("upgrade", help="move the key to bag id + generation")
+    reconcile_p = dedup_sub.add_parser("reconcile", help="cross check set, ledger and records")
+    reconcile_p.add_argument("--json", action="store_true", help="machine readable output")
+    wrap = dedup_sub.add_parser("wrap-point", help="list bags around the latest wrap")
+    wrap.add_argument("--window", type=int, default=5, help="bags on each side of the wrap")
+    wrap.add_argument("--bag", default="", help="show every generation of one bag id")
+
     seed = commands.add_parser("seed", help="seed default lanes and flights")
     seed.add_argument("--persist", action="store_true", help="write a snapshot afterwards")
 
@@ -134,6 +144,41 @@ def _command_reset(store: Store, plant: Plant, args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_dedup(store: Store, plant: Plant, args: argparse.Namespace) -> int:
+    command = args.dedup_command or "status"
+    if command == "upgrade":
+        change = plant.upgrade_dedup_schema()
+        print(json.dumps(change, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "reconcile":
+        report = plant.reconcile_dedup()
+        if args.json:
+            print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0 if report["consistent"] else 1
+        for issue in report["issues"]:
+            print(f"issue: {issue}")
+        print(
+            f"schema=v{report['schema']} dedup={report['dedup_entries']} "
+            f"records={report['sort_records']} instances={report['bag_instances']} "
+            f"consistent={report['consistent']}"
+        )
+        return 0 if report["consistent"] else 1
+    if command == "wrap-point":
+        if args.bag:
+            rows = plant.bag_generations(args.bag)
+            print(json.dumps(rows, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        rows = plant.wrap_point(max(0, args.window))
+        for bag in rows:
+            print(f"epoch={bag['epoch']} seq={bag['sequence']:>5} {bag['id']} ({bag['barcode']})")
+        if not rows:
+            print("no wrap has happened yet")
+        return 0
+    # status
+    print(json.dumps(plant.dedup_status(), ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -163,5 +208,10 @@ def main(argv: list[str] | None = None) -> int:
         return _command_seed(store, plant, args)
     if args.command == "reset":
         return _command_reset(store, plant, args)
+    if args.command == "dedup":
+        code = _command_dedup(store, plant, args)
+        if store.dirty():
+            store.persist()
+        return code
     parser.error(f"unknown command {args.command!r}")
     return 2

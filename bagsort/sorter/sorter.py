@@ -55,8 +55,12 @@ class Sorter:
     def dispatch(self, bag: Bag, reading: Reading) -> SortRecord:
         if not reading.committed:
             raise ConflictError(f"barcode read for {bag.barcode!r} is not committed")
-        if self._log.was_executed(bag.id):
-            raise ConflictError(f"bag {bag.id!r} has already been sorted")
+        # Dedup on the composite (bag id, generation): a post-wrap bag reuses
+        # the id of a bag an earlier generation carried and is not a retry.
+        if self._log.was_executed(bag.id, bag.epoch):
+            raise ConflictError(
+                f"bag {bag.id!r} generation {bag.epoch} has already been sorted"
+            )
         detail = self.route(bag.id)
         record = SortRecord(
             bag_id=bag.id,
@@ -100,8 +104,8 @@ class Sorter:
     def high_water(self) -> tuple[int, int]:
         return self._verdict.high_water()
 
-    def was_executed(self, bag_id: str) -> bool:
-        return self._log.was_executed(bag_id)
+    def was_executed(self, bag_id: str, generation: int | None = None) -> bool:
+        return self._log.was_executed(bag_id, generation)
 
     def records(self) -> list[SortRecord]:
         return self._log.records()

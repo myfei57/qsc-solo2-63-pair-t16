@@ -49,6 +49,7 @@ class AuditChain:
         stage: str,
         detail: dict[str, Any] | None = None,
         at: str | None = None,
+        session=None,
     ) -> AuditEntry:
         if not self._topology.contains(stage):
             raise ValueError(f"unknown handling stage {stage!r}")
@@ -77,9 +78,13 @@ class AuditChain:
             digest=digest,
             at=entry.at,
         )
-        with self._store.session() as session:
+        if session is not None:
             session.state.audit.append(entry)
             session.record("audit.append", {"entry": entry.as_dict()}, entry.at)
+            return entry
+        with self._store.session() as owned:
+            owned.state.audit.append(entry)
+            owned.record("audit.append", {"entry": entry.as_dict()}, entry.at)
         return entry
 
     def for_subject(self, subject: str) -> list[AuditEntry]:

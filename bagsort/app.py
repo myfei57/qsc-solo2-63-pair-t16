@@ -30,6 +30,8 @@ from bagsort.quota.quota import QuotaBook
 from bagsort.recheck.queue import RecheckQueue
 from bagsort.reporting.report import PlantReport
 from bagsort.sequence.verdict import VerdictTracker
+from bagsort.sorter.dedup_book import DedupLog
+from bagsort.sorter.schema import DedupSchemaManager
 from bagsort.sorter.sorter import Sorter
 from bagsort.store.store import Store
 from bagsort.tag.history import ReadHistory
@@ -62,6 +64,8 @@ class Plant:
     chutes: ChuteAssigner
     chute_history: AssignmentHistory
     sorter: Sorter
+    dedup: DedupLog
+    dedup_schema: DedupSchemaManager
     injector: Injector
     desk: Desk
     recheck: RecheckQueue
@@ -91,7 +95,16 @@ class Plant:
         metrics = Metrics()
         bus.subscribe("*", lambda event: telemetry.observe(event.topic))
 
-        reader = TagReader(store, namespace, clock)
+        audit = AuditChain(store, clock, handling_line())
+        dedup = DedupLog(store)
+        dedup_schema = DedupSchemaManager(store, audit, clock)
+
+        reader = TagReader(
+            store,
+            namespace,
+            clock,
+            on_rollover=dedup_schema.upgrade,
+        )
         reads = ReadHistory(store)
         book = FlightBook(store, clock)
         mapping = BagMapping(store, clock)
@@ -106,7 +119,6 @@ class Plant:
         recheck = RecheckQueue(store, book, clock)
         belt = Belt(store, clock, IdFactory("cmd"))
 
-        audit = AuditChain(store, clock, handling_line())
         audit_subscriber = _AuditSubscriber(audit)
         for topic in (
             "bag.checked_in",
@@ -140,6 +152,8 @@ class Plant:
             chutes=chutes,
             chute_history=chute_history,
             sorter=sorter,
+            dedup=dedup,
+            dedup_schema=dedup_schema,
             injector=injector,
             desk=desk,
             recheck=recheck,
@@ -245,6 +259,29 @@ class Plant:
 
     def verify(self) -> bool:
         return self.audit.verify()
+
+    def upgrade_dedup_schema(self) -> dict[str, object]:
+        """Move dispatch dedup to the composite (bag id, generation) key."""
+
+        return self.dedup_schema.upgrade().as_dict()
+
+    def dedup_status(self) -> dict[str, object]:
+        return {
+            "schema": self.dedup.current_schema(),
+            "is_current": self.dedup_schema.is_current(),
+            "history": self.dedup_schema.history(),
+            "boundaries": self.dedup.schema_boundaries(),
+            "reconciliation": self.dedup.reconcile().as_dict(),
+        }
+
+    def reconcile_dedup(self) -> dict[str, object]:
+        return self.dedup.reconcile().as_dict()
+
+    def bag_generations(self, bag_id: str) -> list[dict[str, object]]:
+        return [bag.as_dict() for bag in self.reads.instances_of(bag_id)]
+
+    def wrap_point(self, window: int = 5) -> list[dict[str, object]]:
+        return [bag.as_dict() for bag in self.reads.wrap_point(window)]
 
 
 class _AuditSubscriber:

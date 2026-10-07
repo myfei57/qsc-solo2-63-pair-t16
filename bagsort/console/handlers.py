@@ -312,6 +312,28 @@ def handle_last_chute(server, request: Request) -> Response:
     return json_response({"bag_id": request.param("id"), "chute_id": chute})
 
 
+def handle_bag_generations(server, request: Request) -> Response:
+    """Every generation that ever carried a bag id, oldest first."""
+
+    bag_id = request.param("id")
+    plant = _plant(server)
+    instances = plant.bag_generations(bag_id)
+    sort_records = [
+        record.as_dict()
+        for record in plant.sorter.log.records_for(bag_id)
+    ]
+    return json_response(
+        {
+            "bag_id": bag_id,
+            "generations": plant.dedup.generations_for(bag_id)
+            or plant.reads.generations_of(bag_id),
+            "committed_instances": plant.dedup.instances_for(bag_id),
+            "committed": instances,
+            "sort_records": sort_records,
+        }
+    )
+
+
 # ---------------------------------------------------------------------------
 # chutes and assignments
 # ---------------------------------------------------------------------------
@@ -491,6 +513,34 @@ def handle_verdict(server, request: Request) -> Response:
 def handle_high_water(server, request: Request) -> Response:
     epoch, sequence = _plant(server).sorter.high_water()
     return json_response({"epoch": epoch, "sequence": sequence})
+
+
+# ---------------------------------------------------------------------------
+# dedup key schema, reconciliation and wrap review
+# ---------------------------------------------------------------------------
+
+
+def handle_dedup_status(server, request: Request) -> Response:
+    return json_response(_plant(server).dedup_status())
+
+
+def handle_dedup_upgrade(server, request: Request) -> Response:
+    change = _plant(server).upgrade_dedup_schema()
+    status = 201 if change.get("changed") else 200
+    return json_response(change, status=status)
+
+
+def handle_dedup_reconcile(server, request: Request) -> Response:
+    report = _plant(server).reconcile_dedup()
+    status = 200 if report["consistent"] else 409
+    return json_response(report, status=status)
+
+
+def handle_wrap_point(server, request: Request) -> Response:
+    window = request.query_int("window", 5)
+    return json_response(
+        {"window": window, "bags": _plant(server).wrap_point(max(0, window))}
+    )
 
 
 # ---------------------------------------------------------------------------

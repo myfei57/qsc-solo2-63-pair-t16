@@ -78,6 +78,7 @@ def route_table() -> list[Route]:
         Route("GET", "/api/bags/{id}/route", "resolved route of a bag", "handle_route_detail"),
         Route("GET", "/api/bags/{id}/sort-count", "how often a bag was sorted", "handle_sort_count"),
         Route("GET", "/api/bags/{id}/last-chute", "the chute a bag last used", "handle_last_chute"),
+        Route("GET", "/api/bags/{id}/generations", "every generation that carried an id", "handle_bag_generations"),
         # -- chutes -------------------------------------------------------
         Route("GET", "/api/chutes", "list registered lanes", "handle_list_chutes"),
         Route("POST", "/api/chutes", "register a lane", "handle_register_chute"),
@@ -107,6 +108,10 @@ def route_table() -> list[Route]:
         Route("GET", "/api/sort/by-chute", "sort totals per chute", "handle_sort_by_chute"),
         Route("POST", "/api/sort/verdict", "classify a sequence pair", "handle_verdict"),
         Route("GET", "/api/sort/high-water", "freshness high water mark", "handle_high_water"),
+        Route("GET", "/api/sort/dedup", "dedup key schema and reconciliation", "handle_dedup_status"),
+        Route("POST", "/api/sort/dedup/upgrade", "move dedup to bag id + generation", "handle_dedup_upgrade"),
+        Route("GET", "/api/sort/dedup/reconcile", "cross check set, ledger and records", "handle_dedup_reconcile"),
+        Route("GET", "/api/tag/wrap-point", "bags around the latest wrap, for review", "handle_wrap_point"),
         # -- inject -------------------------------------------------------
         Route("GET", "/api/inject/{flight}/queue", "in-transit queue", "handle_inject_queue"),
         Route("GET", "/api/inject/{flight}/in-transit", "in-transit count", "handle_in_transit"),
